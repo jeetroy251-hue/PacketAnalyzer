@@ -22,3 +22,6 @@ add_executable(packet_analyzer ${SOURCES})
 if(APPLE)
     # Add any macOS-specific settings here
 endif()
+
+# This tells the compiler to look in the 'include' directory for header files
+target_include_directories(packet_analyzer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

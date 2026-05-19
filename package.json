@@ -1,0 +1,31 @@
+{
+  "name": "dpi-engine",
+  "version": "1.0.0",
+  "description": "Deep Packet Inspection Engine in JavaScript - Converted from C++",
+  "main": "src/main.js",
+  "bin": {
+    "dpi-engine": "src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node src/main.js -i test_dpi.pcap -o output.pcap",
+    "help": "node src/main.js --help",
+    "backend": "cd backend && npm start",
+    "frontend": "cd dpi-dashboard && npm run dev"
+  },
+  "keywords": [
+    "dpi",
+    "deep-packet-inspection",
+    "network",
+    "pcap",
+    "packet-analysis",
+    "filtering",
+    "security"
+  ],
+  "author": "DPI Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=12.0.0"
+  },
+  "dependencies": {}
+}

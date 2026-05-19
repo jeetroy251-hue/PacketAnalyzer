@@ -1,1053 +1,831 @@
-# DPI Engine - Deep Packet Inspection System
+# DPI Engine - Deep Packet Inspection System (JavaScript Version)
 
-
-This document explains **everything** about this project - from basic networking concepts to the complete code architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.
-
----
+This document explains everything about this project — from basic networking concepts to the complete JavaScript architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.
 
 ## Table of Contents
 
-1. [What is DPI?](#1-what-is-dpi)
-2. [Networking Background](#2-networking-background)
-3. [Project Overview](#3-project-overview)
-4. [File Structure](#4-file-structure)
-5. [The Journey of a Packet (Simple Version)](#5-the-journey-of-a-packet-simple-version)
-6. [The Journey of a Packet (Multi-threaded Version)](#6-the-journey-of-a-packet-multi-threaded-version)
-7. [Deep Dive: Each Component](#7-deep-dive-each-component)
-8. [How SNI Extraction Works](#8-how-sni-extraction-works)
-9. [How Blocking Works](#9-how-blocking-works)
-10. [Building and Running](#10-building-and-running)
-11. [Understanding the Output](#11-understanding-the-output)
-
----
+- [What is DPI?](#what-is-dpi)
+- [Networking Background](#networking-background)
+- [Project Overview](#project-overview)
+- [File Structure](#file-structure)
+- [The Journey of a Packet (JavaScript Version)](#the-journey-of-a-packet-javascript-version)
+- [The Processing Architecture](#the-processing-architecture)
+- [Deep Dive: Each Component](#deep-dive-each-component)
+- [How SNI Extraction Works](#how-sni-extraction-works)
+- [How Blocking Works](#how-blocking-works)
+- [Installation and Running](#installation-and-running)
+- [Understanding the Output](#understanding-the-output)
+- [Performance Notes](#performance-notes)
+- [Extending the Project](#extending-the-project)
 
 ## 1. What is DPI?
 
-**Deep Packet Inspection (DPI)** is a technology used to examine the contents of network packets as they pass through a checkpoint. Unlike simple firewalls that only look at packet headers (source/destination IP), DPI looks *inside* the packet payload.
+Deep Packet Inspection (DPI) is a technology used to inspect network packets as they travel through a network.
 
-### Real-World Uses:
-- **ISPs**: Throttle or block certain applications (e.g., BitTorrent)
-- **Enterprises**: Block social media on office networks
-- **Parental Controls**: Block inappropriate websites
-- **Security**: Detect malware or intrusion attempts
+Unlike normal firewalls that only inspect:
 
-### What Our DPI Engine Does:
+- Source IP
+- Destination IP
+- Ports
+- Protocols
+
+DPI examines the actual payload data inside packets.
+
+### Real-World Uses
+
+| Use Case | Example |
+|---|---|
+| ISP Traffic Management | Throttle BitTorrent |
+| Enterprise Security | Block social media |
+| Parental Control | Block adult websites |
+| Threat Detection | Detect malware traffic |
+| Analytics | Identify applications |
+
+### What Our DPI Engine Does
+
+```text
+Input PCAP
+     │
+     ▼
+┌───────────────────────┐
+│      DPI Engine       │
+│───────────────────────│
+│ • Parse packets       │
+│ • Track connections   │
+│ • Extract SNI/Host    │
+│ • Detect applications │
+│ • Apply blocking      │
+│ • Generate reports    │
+└───────────────────────┘
+     │
+     ▼
+Filtered Output PCAP
 ```
-User Traffic (PCAP) → [DPI Engine] → Filtered Traffic (PCAP)
-                           ↓
-                    - Identifies apps (YouTube, Facebook, etc.)
-                    - Blocks based on rules
-                    - Generates reports
-```
-
----
 
 ## 2. Networking Background
 
-### The Network Stack (Layers)
+### Network Layers
 
-When you visit a website, data travels through multiple "layers":
+Every network packet travels through multiple layers:
 
+```text
+┌──────────────────────────────────────────────┐
+│ Layer 7 - Application │ HTTP, TLS, DNS       │
+├──────────────────────────────────────────────┤
+│ Layer 4 - Transport   │ TCP / UDP            │
+├──────────────────────────────────────────────┤
+│ Layer 3 - Network     │ IP                   │
+├──────────────────────────────────────────────┤
+│ Layer 2 - Data Link   │ Ethernet / MAC       │
+└──────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Layer 7: Application    │ HTTP, TLS, DNS               │
-├─────────────────────────────────────────────────────────┤
-│ Layer 4: Transport      │ TCP (reliable), UDP (fast)   │
-├─────────────────────────────────────────────────────────┤
-│ Layer 3: Network        │ IP addresses (routing)       │
-├─────────────────────────────────────────────────────────┤
-│ Layer 2: Data Link      │ MAC addresses (local network)│
-└─────────────────────────────────────────────────────────┘
-```
 
-### A Packet's Structure
+### Packet Structure
 
-Every network packet is like a **Russian nesting doll** - headers wrapped inside headers:
+A packet is made of nested headers:
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ Ethernet Header (14 bytes)                                       │
-│ ┌──────────────────────────────────────────────────────────────┐ │
-│ │ IP Header (20 bytes)                                         │ │
-│ │ ┌──────────────────────────────────────────────────────────┐ │ │
-│ │ │ TCP Header (20 bytes)                                    │ │ │
-│ │ │ ┌──────────────────────────────────────────────────────┐ │ │ │
-│ │ │ │ Payload (Application Data)                           │ │ │ │
-│ │ │ │ e.g., TLS Client Hello with SNI                      │ │ │ │
-│ │ │ └──────────────────────────────────────────────────────┘ │ │ │
-│ │ └──────────────────────────────────────────────────────────┘ │ │
-│ └──────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────┐
+│ Ethernet Header                              │
+│ ┌──────────────────────────────────────────┐ │
+│ │ IP Header                                │ │
+│ │ ┌──────────────────────────────────────┐ │ │
+│ │ │ TCP/UDP Header                       │ │ │
+│ │ │ ┌──────────────────────────────────┐ │ │ │
+│ │ │ │ Payload (TLS / HTTP / DNS)       │ │ │ │
+│ │ │ └──────────────────────────────────┘ │ │ │
+│ │ └──────────────────────────────────────┘ │ │
+│ └──────────────────────────────────────────┘ │
+└──────────────────────────────────────────────┘
 ```
 
 ### The Five-Tuple
 
-A **connection** (or "flow") is uniquely identified by 5 values:
+A connection is identified using five values:
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| Source IP | 192.168.1.100 | Who is sending |
-| Destination IP | 172.217.14.206 | Where it's going |
-| Source Port | 54321 | Sender's application identifier |
-| Destination Port | 443 | Service being accessed (443 = HTTPS) |
-| Protocol | TCP (6) | TCP or UDP |
+| Field | Example |
+|---|---|
+| Source IP | 192.168.1.5 |
+| Destination IP | 142.250.183.14 |
+| Source Port | 54321 |
+| Destination Port | 443 |
+| Protocol | TCP |
 
-**Why is this important?** 
-- All packets with the same 5-tuple belong to the same connection
-- If we block one packet of a connection, we should block all of them
-- This is how we "track" conversations between computers
+This is called the Five-Tuple.
 
 ### What is SNI?
 
-**Server Name Indication (SNI)** is part of the TLS/HTTPS handshake. When you visit `https://www.youtube.com`:
+SNI (Server Name Indication) is part of the TLS handshake.
 
-1. Your browser sends a "Client Hello" message
-2. This message includes the domain name in **plaintext** (not encrypted yet!)
-3. The server uses this to know which certificate to send
+When visiting:
 
-```
-TLS Client Hello:
-├── Version: TLS 1.2
-├── Random: [32 bytes]
-├── Cipher Suites: [list]
-└── Extensions:
-    └── SNI Extension:
-        └── Server Name: "www.youtube.com"  ← We extract THIS!
+`https://www.youtube.com`
+
+the browser sends:
+
+```text
+Client Hello
+ └── SNI = "www.youtube.com"
 ```
 
-**This is the key to DPI**: Even though HTTPS is encrypted, the domain name is visible in the first packet!
+before encryption starts.
 
----
+This allows the DPI engine to identify websites even on HTTPS.
 
 ## 3. Project Overview
 
-### What This Project Does
-
+```text
+Input → Processing → Output
+┌──────────────┐
+│ input.pcap   │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────────────┐
+│ JavaScript DPI Engine │
+├──────────────────────┤
+│ Packet Parsing        │
+│ Flow Tracking         │
+│ TLS Inspection        │
+│ Rule Filtering        │
+│ Statistics            │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ output.pcap          │
+└──────────────────────┘
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Wireshark   │     │ DPI Engine  │     │ Output      │
-│ Capture     │ ──► │             │ ──► │ PCAP        │
-│ (input.pcap)│     │ - Parse     │     │ (filtered)  │
-└─────────────┘     │ - Classify  │     └─────────────┘
-                    │ - Block     │
-                    │ - Report    │
-                    └─────────────┘
-```
 
-### Two Versions
+### Key Features
 
-| Version | File | Use Case |
-|---------|------|----------|
-| Simple (Single-threaded) | `src/main_working.cpp` | Learning, small captures |
-| Multi-threaded | `src/dpi_mt.cpp` | Production, large captures |
-
----
+- PCAP reading and writing
+- Ethernet/IP/TCP/UDP parsing
+- TLS SNI extraction
+- HTTP Host extraction
+- DNS query parsing
+- Application identification
+- Connection tracking
+- Blocking by:
+  - App
+  - IP
+  - Domain
+- Statistics reporting
 
 ## 4. File Structure
 
-```
-packet_analyzer/
-├── include/                    # Header files (declarations)
-│   ├── pcap_reader.h          # PCAP file reading
-│   ├── packet_parser.h        # Network protocol parsing
-│   ├── sni_extractor.h        # TLS/HTTP inspection
-│   ├── types.h                # Data structures (FiveTuple, AppType, etc.)
-│   ├── rule_manager.h         # Blocking rules (multi-threaded version)
-│   ├── connection_tracker.h   # Flow tracking (multi-threaded version)
-│   ├── load_balancer.h        # LB thread (multi-threaded version)
-│   ├── fast_path.h            # FP thread (multi-threaded version)
-│   ├── thread_safe_queue.h    # Thread-safe queue
-│   └── dpi_engine.h           # Main orchestrator
+```text
+Packet_analyzer/
 │
-├── src/                        # Implementation files
-│   ├── pcap_reader.cpp        # PCAP file handling
-│   ├── packet_parser.cpp      # Protocol parsing
-│   ├── sni_extractor.cpp      # SNI/Host extraction
-│   ├── types.cpp              # Helper functions
-│   ├── main_working.cpp       # ★ SIMPLE VERSION ★
-│   ├── dpi_mt.cpp             # ★ MULTI-THREADED VERSION ★
-│   └── [other files]          # Supporting code
+├── src/
+│   ├── main.js
+│   ├── dpiEngine.js
+│   ├── pcapReader.js
+│   ├── packetParser.js
+│   ├── sniExtractor.js
+│   ├── connectionTracker.js
+│   ├── ruleManager.js
+│   ├── loadBalancer.js
+│   ├── fastPath.js
+│   └── types.js
 │
-├── generate_test_pcap.py      # Creates test data
-├── test_dpi.pcap              # Sample capture with various traffic
-└── README.md                  # This file!
+├── test_dpi.pcap
+├── rules.txt
+├── output.pcap
+├── package.json
+└── README.md
 ```
 
----
+### File Mapping (C++ → JavaScript)
 
-## 5. The Journey of a Packet (Simple Version)
+```text
+C++                          →  JavaScript
+─────────────────────────────────────────────────
+include/types.h              →  src/types.js
+include/pcap_reader.h        →  src/pcapReader.js
+include/packet_parser.h      →  src/packetParser.js
+include/sni_extractor.h      →  src/sniExtractor.js
+include/connection_tracker.h →  src/connectionTracker.js
+include/rule_manager.h       →  src/ruleManager.js
+include/fast_path.h          →  src/fastPath.js
+include/load_balancer.h      →  src/loadBalancer.js
+include/dpi_engine.h         →  src/dpiEngine.js
+src/main_dpi.cpp             →  src/main.js
+```
 
-Let's trace a single packet through `main_working.cpp`:
+## 5. The Journey of a Packet (JavaScript Version)
+
+Let's trace one packet through the engine.
 
 ### Step 1: Read PCAP File
 
-```cpp
-PcapReader reader;
-reader.open("capture.pcap");
+```js
+const reader = new PcapReader(inputFile);
+reader.open();
 ```
 
-**What happens:**
-1. Open the file in binary mode
-2. Read the 24-byte global header (magic number, version, etc.)
-3. Verify it's a valid PCAP file
+What happens:
 
-**PCAP File Format:**
-```
+- Open file using Node.js `fs`
+- Read PCAP global header
+- Validate PCAP format
+
+#### PCAP File Structure
+
+```text
 ┌────────────────────────────┐
-│ Global Header (24 bytes)   │  ← Read once at start
+│ Global Header              │
 ├────────────────────────────┤
-│ Packet Header (16 bytes)   │  ← Timestamp, length
-│ Packet Data (variable)     │  ← Actual network bytes
+│ Packet Header              │
+│ Packet Data                │
 ├────────────────────────────┤
-│ Packet Header (16 bytes)   │
-│ Packet Data (variable)     │
-├────────────────────────────┤
-│ ... more packets ...       │
+│ Packet Header              │
+│ Packet Data                │
 └────────────────────────────┘
 ```
 
-### Step 2: Read Each Packet
+### Step 2: Read Individual Packets
 
-```cpp
-while (reader.readNextPacket(raw)) {
-    // raw.data contains the packet bytes
-    // raw.header contains timestamp and length
-}
+```js
+const rawPacket = reader.readNextPacket();
 ```
 
-**What happens:**
-1. Read 16-byte packet header
-2. Read N bytes of packet data (N = header.incl_len)
-3. Return false when no more packets
+Each packet contains:
+
+```js
+{
+  header: {
+    tsSec,
+    tsUsec,
+    inclLen,
+    origLen
+  },
+  data: Buffer
+}
+```
 
 ### Step 3: Parse Protocol Headers
 
-```cpp
-PacketParser::parse(raw, parsed);
+```js
+const parsed = PacketParser.parse(rawPacket);
 ```
 
-**What happens (in packet_parser.cpp):**
+The parser extracts:
 
-```
-raw.data bytes:
-[0-13]   Ethernet Header
-[14-33]  IP Header  
-[34-53]  TCP Header
-[54+]    Payload
-
-After parsing:
-parsed.src_mac  = "00:11:22:33:44:55"
-parsed.dest_mac = "aa:bb:cc:dd:ee:ff"
-parsed.src_ip   = "192.168.1.100"
-parsed.dest_ip  = "172.217.14.206"
-parsed.src_port = 54321
-parsed.dest_port = 443
-parsed.protocol = 6 (TCP)
-parsed.has_tcp  = true
-```
-
-**Parsing the Ethernet Header (14 bytes):**
-```
-Bytes 0-5:   Destination MAC
-Bytes 6-11:  Source MAC
-Bytes 12-13: EtherType (0x0800 = IPv4)
-```
-
-**Parsing the IP Header (20+ bytes):**
-```
-Byte 0:      Version (4 bits) + Header Length (4 bits)
-Byte 8:      TTL (Time To Live)
-Byte 9:      Protocol (6=TCP, 17=UDP)
-Bytes 12-15: Source IP
-Bytes 16-19: Destination IP
-```
-
-**Parsing the TCP Header (20+ bytes):**
-```
-Bytes 0-1:   Source Port
-Bytes 2-3:   Destination Port
-Bytes 4-7:   Sequence Number
-Bytes 8-11:  Acknowledgment Number
-Byte 12:     Data Offset (header length)
-Byte 13:     Flags (SYN, ACK, FIN, etc.)
-```
-
-### Step 4: Create Five-Tuple and Look Up Flow
-
-```cpp
-FiveTuple tuple;
-tuple.src_ip = parseIP(parsed.src_ip);
-tuple.dst_ip = parseIP(parsed.dest_ip);
-tuple.src_port = parsed.src_port;
-tuple.dst_port = parsed.dest_port;
-tuple.protocol = parsed.protocol;
-
-Flow& flow = flows[tuple];  // Get or create
-```
-
-**What happens:**
-- The flow table is a hash map: `FiveTuple → Flow`
-- If this 5-tuple exists, we get the existing flow
-- If not, a new flow is created
-- All packets with the same 5-tuple share the same flow
-
-### Step 5: Extract SNI (Deep Packet Inspection)
-
-```cpp
-// For HTTPS traffic (port 443)
-if (pkt.tuple.dst_port == 443 && pkt.payload_length > 5) {
-    auto sni = SNIExtractor::extract(payload, payload_length);
-    if (sni) {
-        flow.sni = *sni;                    // "www.youtube.com"
-        flow.app_type = sniToAppType(*sni); // AppType::YOUTUBE
-    }
+```js
+{
+  srcIP,
+  dstIP,
+  srcPort,
+  dstPort,
+  protocol,
+  payload,
+  payloadOffset
 }
 ```
 
-**What happens (in sni_extractor.cpp):**
+#### Ethernet Parsing
 
-1. **Check if it's a TLS Client Hello:**
-   ```
-   Byte 0: Content Type = 0x16 (Handshake) ✓
-   Byte 5: Handshake Type = 0x01 (Client Hello) ✓
-   ```
+- Bytes 0-5 → Destination MAC
+- Bytes 6-11 → Source MAC
+- Bytes 12-13 → EtherType
 
-2. **Navigate to Extensions:**
-   ```
-   Skip: Version, Random, Session ID, Cipher Suites, Compression
-   ```
+#### IP Parsing
 
-3. **Find SNI Extension (type 0x0000):**
-   ```
-   Extension Type: 0x0000 (SNI)
-   Extension Length: N
-   SNI List Length: M
-   SNI Type: 0x00 (hostname)
-   SNI Length: L
-   SNI Value: "www.youtube.com"  ← FOUND!
-   ```
+- Byte 0 → Version + Header Length
+- Byte 9 → Protocol
+- Bytes 12-15 → Source IP
+- Bytes 16-19 → Destination IP
 
-4. **Map SNI to App Type:**
-   ```cpp
-   // In types.cpp
-   if (sni.find("youtube") != std::string::npos) {
-       return AppType::YOUTUBE;
-   }
-   ```
+#### TCP Parsing
 
-### Step 6: Check Blocking Rules
+- Bytes 0-1 → Source Port
+- Bytes 2-3 → Destination Port
+- Bytes 4-7 → Sequence Number
+- Bytes 8-11 → ACK Number
 
-```cpp
-if (rules.isBlocked(tuple.src_ip, flow.app_type, flow.sni)) {
-    flow.blocked = true;
+### Step 4: Create Flow Key
+
+```js
+const flowKey = `${srcIP}:${srcPort}-${dstIP}:${dstPort}-${protocol}`;
+```
+
+This uniquely identifies a connection.
+
+### Step 5: Connection Tracking
+
+```js
+const flow = connectionTracker.getOrCreate(flowKey);
+```
+
+The engine stores:
+
+```js
+{
+  appType,
+  sni,
+  blocked,
+  packetCount,
+  byteCount
 }
 ```
 
-**What happens:**
-```cpp
-// Check IP blacklist
-if (blocked_ips.count(src_ip)) return true;
+### Step 6: Extract SNI / Host
 
-// Check app blacklist
-if (blocked_apps.count(app)) return true;
+For HTTPS traffic:
 
-// Check domain blacklist (substring match)
-for (const auto& dom : blocked_domains) {
-    if (sni.find(dom) != std::string::npos) return true;
-}
-
-return false;
+```js
+const sni = SNIExtractor.extract(payload);
 ```
 
-### Step 7: Forward or Drop
+Possible result:
 
-```cpp
-if (flow.blocked) {
-    dropped++;
-    // Don't write to output
-} else {
-    forwarded++;
-    // Write packet to output file
-    output.write(packet_header);
-    output.write(packet_data);
+`"www.youtube.com"`
+
+### Step 7: Detect Application
+
+```js
+if (sni.includes("youtube")) {
+  flow.appType = "YOUTUBE";
 }
 ```
 
-### Step 8: Generate Report
+### Step 8: Apply Blocking Rules
 
-After processing all packets:
-```cpp
-// Count apps
-for (const auto& [tuple, flow] : flows) {
-    app_stats[flow.app_type]++;
-}
-
-// Print report
-"YouTube: 150 packets (15%)"
-"Facebook: 80 packets (8%)"
-...
-```
-
----
-
-## 6. The Journey of a Packet (Multi-threaded Version)
-
-The multi-threaded version (`dpi_mt.cpp`) adds **parallelism** for high performance:
-
-### Architecture Overview
-
-```
-                    ┌─────────────────┐
-                    │  Reader Thread  │
-                    │  (reads PCAP)   │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              │      hash(5-tuple) % 2      │
-              ▼                             ▼
-    ┌─────────────────┐           ┌─────────────────┐
-    │  LB0 Thread     │           │  LB1 Thread     │
-    │  (Load Balancer)│           │  (Load Balancer)│
-    └────────┬────────┘           └────────┬────────┘
-             │                             │
-      ┌──────┴──────┐               ┌──────┴──────┐
-      │hash % 2     │               │hash % 2     │
-      ▼             ▼               ▼             ▼
-┌──────────┐ ┌──────────┐   ┌──────────┐ ┌──────────┐
-│FP0 Thread│ │FP1 Thread│   │FP2 Thread│ │FP3 Thread│
-│(Fast Path)│ │(Fast Path)│   │(Fast Path)│ │(Fast Path)│
-└─────┬────┘ └─────┬────┘   └─────┬────┘ └─────┬────┘
-      │            │              │            │
-      └────────────┴──────────────┴────────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │   Output Queue        │
-              └───────────┬───────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │  Output Writer Thread │
-              │  (writes to PCAP)     │
-              └───────────────────────┘
-```
-
-### Why This Design?
-
-1. **Load Balancers (LBs):** Distribute work across FPs
-2. **Fast Paths (FPs):** Do the actual DPI processing
-3. **Consistent Hashing:** Same 5-tuple always goes to same FP
-
-**Why consistent hashing matters:**
-```
-Connection: 192.168.1.100:54321 → 142.250.185.206:443
-
-Packet 1 (SYN):         hash → FP2
-Packet 2 (SYN-ACK):     hash → FP2  (same FP!)
-Packet 3 (Client Hello): hash → FP2  (same FP!)
-Packet 4 (Data):        hash → FP2  (same FP!)
-
-All packets of this connection go to FP2.
-FP2 can track the flow state correctly.
-```
-
-### Detailed Flow
-
-#### Step 1: Reader Thread
-
-```cpp
-// Main thread reads PCAP
-while (reader.readNextPacket(raw)) {
-    Packet pkt = createPacket(raw);
-    
-    // Hash to select Load Balancer
-    size_t lb_idx = hash(pkt.tuple) % num_lbs;
-    
-    // Push to LB's queue
-    lbs_[lb_idx]->queue().push(pkt);
+```js
+if (ruleManager.isBlocked(flow)) {
+  flow.blocked = true;
 }
 ```
 
-#### Step 2: Load Balancer Thread
+Rules can block:
 
-```cpp
-void LoadBalancer::run() {
-    while (running_) {
-        // Pop from my input queue
-        auto pkt = input_queue_.pop();
-        
-        // Hash to select Fast Path
-        size_t fp_idx = hash(pkt.tuple) % num_fps_;
-        
-        // Push to FP's queue
-        fps_[fp_idx]->queue().push(pkt);
-    }
+- IPs
+- Apps
+- Domains
+
+### Step 9: Forward or Drop
+
+```js
+if (!flow.blocked) {
+  writer.write(packet);
 }
 ```
 
-#### Step 3: Fast Path Thread
+Blocked packets are discarded.
 
-```cpp
-void FastPath::run() {
-    while (running_) {
-        // Pop from my input queue
-        auto pkt = input_queue_.pop();
-        
-        // Look up flow (each FP has its own flow table)
-        Flow& flow = flows_[pkt.tuple];
-        
-        // Classify (SNI extraction)
-        classifyFlow(pkt, flow);
-        
-        // Check rules
-        if (rules_->isBlocked(pkt.tuple.src_ip, flow.app_type, flow.sni)) {
-            stats_->dropped++;
-        } else {
-            // Forward: push to output queue
-            output_queue_->push(pkt);
-        }
-    }
-}
+## 6. The Processing Architecture
+
+Although Node.js is single-threaded, this project simulates a high-performance DPI architecture using asynchronous processing.
+
+```text
+                ┌────────────────┐
+                │ PCAP Reader    │
+                └──────┬─────────┘
+                       │
+                       ▼
+            ┌────────────────────┐
+            │ Load Balancer      │
+            └──────┬─────────────┘
+                   │
+     ┌─────────────┼─────────────┐
+     ▼             ▼             ▼
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│ FastPath │ │ FastPath │ │ FastPath │
+│ Queue 0  │ │ Queue 1  │ │ Queue 2  │
+└────┬─────┘ └────┬─────┘ └────┬─────┘
+     │             │            │
+     └─────────────┴────────────┘
+                   │
+                   ▼
+          ┌─────────────────┐
+          │ Output Writer   │
+          └─────────────────┘
 ```
 
-#### Step 4: Output Writer Thread
+### Why Use Queues?
 
-```cpp
-void outputThread() {
-    while (running_ || output_queue_.size() > 0) {
-        auto pkt = output_queue_.pop();
-        
-        // Write to output file
-        output_file.write(packet_header);
-        output_file.write(pkt.data);
-    }
-}
+Queues help:
+
+- distribute work
+- isolate processing stages
+- simulate parallel pipelines
+- avoid blocking operations
+
+### Hash-Based Distribution
+
+```js
+const index = hash(flowKey) % numFastPaths;
 ```
 
-### Thread-Safe Queue
+This ensures packets from the same connection always go to the same Fast Path.
 
-The magic that makes multi-threading work:
+### Why This Matters
 
-```cpp
-template<typename T>
-class TSQueue {
-    std::queue<T> queue_;
-    std::mutex mutex_;
-    std::condition_variable not_empty_;
-    std::condition_variable not_full_;
-    
-    void push(T item) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(item);
-        not_empty_.notify_one();  // Wake up waiting consumer
-    }
-    
-    T pop() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        not_empty_.wait(lock, [&]{ return !queue_.empty(); });
-        T item = queue_.front();
-        queue_.pop();
-        return item;
-    }
-};
+Without consistent hashing:
+
+```text
+Packet 1 → FP0
+Packet 2 → FP2
+Packet 3 → FP1
 ```
 
-**How it works:**
-- `push()`: Producer adds item, signals waiting consumers
-- `pop()`: Consumer waits until item available, then takes it
-- `mutex`: Only one thread can access at a time
-- `condition_variable`: Efficient waiting (no busy-loop)
+Flow tracking would break.
 
----
+With hashing:
+
+```text
+Packet 1 → FP2
+Packet 2 → FP2
+Packet 3 → FP2
+```
+
+All packets stay together.
 
 ## 7. Deep Dive: Each Component
 
-### pcap_reader.h / pcap_reader.cpp
+### `pcapReader.js`
 
-**Purpose:** Read network captures saved by Wireshark
+Purpose:
 
-**Key structures:**
-```cpp
-struct PcapGlobalHeader {
-    uint32_t magic_number;   // 0xa1b2c3d4 identifies PCAP
-    uint16_t version_major;  // Usually 2
-    uint16_t version_minor;  // Usually 4
-    uint32_t snaplen;        // Max packet size captured
-    uint32_t network;        // 1 = Ethernet
-};
+- Read PCAP files
+- Parse packet headers
+- Return raw packet buffers
 
-struct PcapPacketHeader {
-    uint32_t ts_sec;         // Timestamp (seconds)
-    uint32_t ts_usec;        // Timestamp (microseconds)
-    uint32_t incl_len;       // Bytes saved in file
-    uint32_t orig_len;       // Original packet size
-};
-```
+Main functions:
 
-**Key functions:**
-- `open(filename)`: Open PCAP, validate header
-- `readNextPacket(raw)`: Read next packet into buffer
-- `close()`: Clean up
+- `open()`
+- `readNextPacket()`
+- `close()`
 
-### packet_parser.h / packet_parser.cpp
+### `packetParser.js`
 
-**Purpose:** Extract protocol fields from raw bytes
+Purpose:
 
-**Key function:**
-```cpp
-bool PacketParser::parse(const RawPacket& raw, ParsedPacket& parsed) {
-    parseEthernet(...);  // Extract MACs, EtherType
-    parseIPv4(...);      // Extract IPs, protocol, TTL
-    parseTCP(...);       // Extract ports, flags, seq numbers
-    // OR
-    parseUDP(...);       // Extract ports
-}
-```
+- Parse Ethernet/IP/TCP/UDP headers
 
-**Important concepts:**
+Main tasks:
 
-*Network Byte Order:* Network protocols use big-endian (most significant byte first). Your computer might use little-endian. We use `ntohs()` and `ntohl()` to convert:
-```cpp
-// ntohs = Network TO Host Short (16-bit)
-uint16_t port = ntohs(*(uint16_t*)(data + offset));
+- `parseEthernet()`
+- `parseIPv4()`
+- `parseTCP()`
+- `parseUDP()`
 
-// ntohl = Network TO Host Long (32-bit)
-uint32_t seq = ntohl(*(uint32_t*)(data + offset));
-```
+### `sniExtractor.js`
 
-### sni_extractor.h / sni_extractor.cpp
+Purpose:
 
-**Purpose:** Extract domain names from TLS and HTTP
+- Extract TLS SNI
+- Extract HTTP Host header
+- Extract DNS query names
 
-**For TLS (HTTPS):**
-```cpp
-std::optional<std::string> SNIExtractor::extract(
-    const uint8_t* payload, 
-    size_t length
-) {
-    // 1. Verify TLS record header
-    // 2. Verify Client Hello handshake
-    // 3. Skip to extensions
-    // 4. Find SNI extension (type 0x0000)
-    // 5. Extract hostname string
-}
-```
+Main functions:
 
-**For HTTP:**
-```cpp
-std::optional<std::string> HTTPHostExtractor::extract(
-    const uint8_t* payload,
-    size_t length
-) {
-    // 1. Verify HTTP request (GET, POST, etc.)
-    // 2. Search for "Host: " header
-    // 3. Extract value until newline
-}
-```
+- `extractTLS()`
+- `extractHTTPHost()`
+- `extractDNS()`
 
-### types.h / types.cpp
+### `connectionTracker.js`
 
-**Purpose:** Define data structures used throughout
+Purpose:
 
-**FiveTuple:**
-```cpp
-struct FiveTuple {
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint8_t  protocol;
-    
-    bool operator==(const FiveTuple& other) const;
-};
-```
+- Track active flows
 
-**AppType:**
-```cpp
-enum class AppType {
-    UNKNOWN,
-    HTTP,
-    HTTPS,
-    DNS,
-    GOOGLE,
-    YOUTUBE,
-    FACEBOOK,
-    // ... more apps
-};
-```
+Stores:
 
-**sniToAppType function:**
-```cpp
-AppType sniToAppType(const std::string& sni) {
-    if (sni.find("youtube") != std::string::npos) 
-        return AppType::YOUTUBE;
-    if (sni.find("facebook") != std::string::npos) 
-        return AppType::FACEBOOK;
-    // ... more patterns
-}
-```
+- `Map<flowKey, Flow>`
 
----
+### `ruleManager.js`
+
+Purpose:
+
+- Store blocking rules
+
+Supports:
+
+- `blockedIPs`
+- `blockedApps`
+- `blockedDomains`
+
+### `loadBalancer.js`
+
+Purpose:
+
+- Distribute packets across processing queues
+
+### `fastPath.js`
+
+Purpose:
+
+- Core packet processing logic
+
+Responsibilities:
+
+- flow lookup
+- classification
+- filtering
+- statistics
+
+### `dpiEngine.js`
+
+Main orchestrator.
+
+Controls:
+
+- startup
+- queues
+- readers
+- processors
+- writers
+- reports
 
 ## 8. How SNI Extraction Works
 
-### The TLS Handshake
-
-When you visit `https://www.youtube.com`:
-
-```
-┌──────────┐                              ┌──────────┐
-│  Browser │                              │  Server  │
-└────┬─────┘                              └────┬─────┘
-     │                                         │
-     │ ──── Client Hello ─────────────────────►│
-     │      (includes SNI: www.youtube.com)    │
-     │                                         │
-     │ ◄─── Server Hello ───────────────────── │
-     │      (includes certificate)             │
-     │                                         │
-     │ ──── Key Exchange ─────────────────────►│
-     │                                         │
-     │ ◄═══ Encrypted Data ══════════════════► │
-     │      (from here on, everything is       │
-     │       encrypted - we can't see it)      │
+```text
+Browser                         Server
+   │                               │
+   ├── Client Hello ─────────────► │
+   │      SNI: youtube.com         │
+   │                               │
+   ◄── Server Hello ──────────────┤
+   │                               │
+   ═══ Encrypted Traffic ══════════
 ```
 
-**We can only extract SNI from the Client Hello!**
+The SNI is visible before encryption.
 
-### TLS Client Hello Structure
+### TLS Structure
 
-```
-Byte 0:     Content Type = 0x16 (Handshake)
-Bytes 1-2:  Version = 0x0301 (TLS 1.0)
-Bytes 3-4:  Record Length
+- TLS Record Header
+  - Content Type
+  - Version
+  - Length
 
--- Handshake Layer --
-Byte 5:     Handshake Type = 0x01 (Client Hello)
-Bytes 6-8:  Handshake Length
+- Handshake Header
+  - Handshake Type
+  - Length
 
--- Client Hello Body --
-Bytes 9-10:  Client Version
-Bytes 11-42: Random (32 bytes)
-Byte 43:     Session ID Length (N)
-Bytes 44 to 44+N: Session ID
-... Cipher Suites ...
-... Compression Methods ...
+- Extensions
+  - SNI Extension
+    - Hostname
 
--- Extensions --
-Bytes X-X+1: Extensions Length
-For each extension:
-    Bytes: Extension Type (2)
-    Bytes: Extension Length (2)
-    Bytes: Extension Data
+### Simplified JavaScript Extraction
 
--- SNI Extension (Type 0x0000) --
-Extension Type: 0x0000
-Extension Length: L
-  SNI List Length: M
-  SNI Type: 0x00 (hostname)
-  SNI Length: K
-  SNI Value: "www.youtube.com" ← THE GOAL!
-```
+```js
+function extractSNI(buffer) {
+  if (buffer[0] !== 0x16) return null;
 
-### Our Extraction Code (Simplified)
-
-```cpp
-std::optional<std::string> SNIExtractor::extract(
-    const uint8_t* payload, size_t length
-) {
-    // Check TLS record header
-    if (payload[0] != 0x16) return std::nullopt;  // Not handshake
-    if (payload[5] != 0x01) return std::nullopt;  // Not Client Hello
-    
-    size_t offset = 43;  // Skip to session ID
-    
-    // Skip Session ID
-    uint8_t session_len = payload[offset];
-    offset += 1 + session_len;
-    
-    // Skip Cipher Suites
-    uint16_t cipher_len = readUint16BE(payload + offset);
-    offset += 2 + cipher_len;
-    
-    // Skip Compression Methods
-    uint8_t comp_len = payload[offset];
-    offset += 1 + comp_len;
-    
-    // Read Extensions Length
-    uint16_t ext_len = readUint16BE(payload + offset);
-    offset += 2;
-    
-    // Search for SNI extension
-    size_t ext_end = offset + ext_len;
-    while (offset + 4 <= ext_end) {
-        uint16_t ext_type = readUint16BE(payload + offset);
-        uint16_t ext_data_len = readUint16BE(payload + offset + 2);
-        offset += 4;
-        
-        if (ext_type == 0x0000) {  // SNI!
-            // Parse SNI structure
-            uint16_t sni_len = readUint16BE(payload + offset + 3);
-            return std::string(
-                (char*)(payload + offset + 5), 
-                sni_len
-            );
-        }
-        
-        offset += ext_data_len;
-    }
-    
-    return std::nullopt;  // SNI not found
+  const serverName = findSNIExtension(buffer);
+  return serverName;
 }
 ```
 
----
+Example:
+
+- `www.youtube.com`
+
+gets mapped to:
+
+- `AppType.YOUTUBE`
 
 ## 9. How Blocking Works
 
 ### Rule Types
 
-| Rule Type | Example | What it Blocks |
-|-----------|---------|----------------|
-| IP | `192.168.1.50` | All traffic from this source |
-| App | `YouTube` | All YouTube connections |
-| Domain | `tiktok` | Any SNI containing "tiktok" |
+| Rule | Example |
+|---|---|
+| IP | 192.168.1.50 |
+| App | YOUTUBE |
+| Domain | facebook |
 
-### The Blocking Flow
+### Decision Flow
 
-```
-Packet arrives
+```text
+Packet Arrives
       │
       ▼
-┌─────────────────────────────────┐
-│ Is source IP in blocked list?  │──Yes──► DROP
-└───────────────┬─────────────────┘
-                │No
-                ▼
-┌─────────────────────────────────┐
-│ Is app type in blocked list?   │──Yes──► DROP
-└───────────────┬─────────────────┘
-                │No
-                ▼
-┌─────────────────────────────────┐
-│ Does SNI match blocked domain? │──Yes──► DROP
-└───────────────┬─────────────────┘
-                │No
-                ▼
-            FORWARD
+Blocked IP?
+      │
+     Yes ───► DROP
+      │
+      No
+      ▼
+Blocked App?
+      │
+     Yes ───► DROP
+      │
+      No
+      ▼
+Blocked Domain?
+      │
+     Yes ───► DROP
+      │
+      No
+      ▼
+FORWARD
 ```
 
 ### Flow-Based Blocking
 
-**Important:** We block at the *flow* level, not packet level.
+Example:
 
-```
-Connection to YouTube:
-  Packet 1 (SYN)           → No SNI yet, FORWARD
-  Packet 2 (SYN-ACK)       → No SNI yet, FORWARD  
-  Packet 3 (ACK)           → No SNI yet, FORWARD
-  Packet 4 (Client Hello)  → SNI: www.youtube.com
-                           → App: YOUTUBE (blocked!)
-                           → Mark flow as BLOCKED
-                           → DROP this packet
-  Packet 5 (Data)          → Flow is BLOCKED → DROP
-  Packet 6 (Data)          → Flow is BLOCKED → DROP
-  ...all subsequent packets → DROP
+```text
+Packet 1 → SYN → FORWARD
+Packet 2 → ACK → FORWARD
+Packet 3 → TLS Client Hello
+             SNI = youtube.com
+             BLOCK FLOW
+Packet 4 → DROP
+Packet 5 → DROP
 ```
 
-**Why this approach?**
-- We can't identify the app until we see the Client Hello
-- Once identified, we block all future packets of that flow
-- The connection will fail/timeout on the client
+## 10. Installation and Running
 
----
+### Requirements
 
-## 10. Building and Running
+Install:
 
-### Prerequisites
+- Node.js 18+
 
-- **macOS/Linux** with C++17 compiler
-- **g++** or **clang++**
-- No external libraries needed!
-
-### Build Commands
-
-**Simple Version:**
-```bash
-g++ -std=c++17 -O2 -I include -o dpi_simple \
-    src/main_working.cpp \
-    src/pcap_reader.cpp \
-    src/packet_parser.cpp \
-    src/sni_extractor.cpp \
-    src/types.cpp
-```
-
-**Multi-threaded Version:**
-```bash
-g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
-    src/dpi_mt.cpp \
-    src/pcap_reader.cpp \
-    src/packet_parser.cpp \
-    src/sni_extractor.cpp \
-    src/types.cpp
-```
-
-### Running
-
-**Basic usage:**
-```bash
-./dpi_engine test_dpi.pcap output.pcap
-```
-
-**With blocking:**
-```bash
-./dpi_engine test_dpi.pcap output.pcap \
-    --block-app YouTube \
-    --block-app TikTok \
-    --block-ip 192.168.1.50 \
-    --block-domain facebook
-```
-
-**Configure threads (multi-threaded only):**
-```bash
-./dpi_engine input.pcap output.pcap --lbs 4 --fps 4
-# Creates 4 LB threads × 4 FP threads = 16 processing threads
-```
-
-### Creating Test Data
+Check version:
 
 ```bash
-python3 generate_test_pcap.py
-# Creates test_dpi.pcap with sample traffic
+node --version
 ```
 
----
+### Running the Engine
+
+#### Basic Usage
+
+```bash
+node src/main.js -i test_dpi.pcap -o output.pcap
+```
+
+#### With Rules
+
+```bash
+node src/main.js -i test_dpi.pcap -o output.pcap -r rules.txt
+```
+
+#### Custom Configuration
+
+```bash
+node src/main.js -i test_dpi.pcap -o output.pcap --lbs 4 --fps-per-lb 8
+```
+
+#### Using npm
+
+```bash
+npm test
+```
+
+### Output Files
+
+| File | Purpose |
+|---|---|
+| `output.pcap` | Filtered packets |
+| Console Report | Statistics |
+
+Open output in Wireshark:
+
+```bash
+wireshark output.pcap
+```
 
 ## 11. Understanding the Output
 
-### Sample Output
+### Example Console Output
 
-```
-╔══════════════════════════════════════════════════════════════╗
-║              DPI ENGINE v2.0 (Multi-threaded)                 ║
-╠══════════════════════════════════════════════════════════════╣
-║ Load Balancers:  2    FPs per LB:  2    Total FPs:  4        ║
-╚══════════════════════════════════════════════════════════════╝
+```text
+================================
+  Deep Packet Inspection Engine
+  JavaScript Version
+================================
 
-[Rules] Blocked app: YouTube
-[Rules] Blocked IP: 192.168.1.50
+[DPIEngine] Processing: test_dpi.pcap
 
-[Reader] Processing packets...
-[Reader] Done reading 77 packets
+[Reader] Finished reading 500 packets
 
-╔══════════════════════════════════════════════════════════════╗
-║                      PROCESSING REPORT                        ║
-╠══════════════════════════════════════════════════════════════╣
-║ Total Packets:                77                              ║
-║ Total Bytes:                5738                              ║
-║ TCP Packets:                  73                              ║
-║ UDP Packets:                   4                              ║
-╠══════════════════════════════════════════════════════════════╣
-║ Forwarded:                    69                              ║
-║ Dropped:                       8                              ║
-╠══════════════════════════════════════════════════════════════╣
-║ THREAD STATISTICS                                             ║
-║   LB0 dispatched:             53                              ║
-║   LB1 dispatched:             24                              ║
-║   FP0 processed:              53                              ║
-║   FP1 processed:               0                              ║
-║   FP2 processed:               0                              ║
-║   FP3 processed:              24                              ║
-╠══════════════════════════════════════════════════════════════╣
-║                   APPLICATION BREAKDOWN                       ║
-╠══════════════════════════════════════════════════════════════╣
-║ HTTPS                39  50.6% ##########                     ║
-║ Unknown              16  20.8% ####                           ║
-║ YouTube               4   5.2% # (BLOCKED)                    ║
-║ DNS                   4   5.2% #                              ║
-║ Facebook              3   3.9%                                ║
-║ ...                                                           ║
-╚══════════════════════════════════════════════════════════════╝
-
-[Detected Domains/SNIs]
-  - www.youtube.com -> YouTube
-  - www.facebook.com -> Facebook
-  - www.google.com -> Google
-  - github.com -> GitHub
-  ...
+╔════════════════════════════════════════════╗
+║             DPI STATISTICS                ║
+╠════════════════════════════════════════════╣
+║ Total Packets: 500                        ║
+║ TCP Packets:   350                        ║
+║ UDP Packets:   150                        ║
+║ Forwarded:     420                        ║
+║ Dropped:       80                         ║
+╚════════════════════════════════════════════╝
 ```
 
-### What Each Section Means
+### Application Breakdown
 
-| Section | Meaning |
-|---------|---------|
-| Configuration | Number of threads created |
-| Rules | Which blocking rules are active |
-| Total Packets | Packets read from input file |
-| Forwarded | Packets written to output file |
-| Dropped | Packets blocked (not written) |
-| Thread Statistics | Work distribution across threads |
-| Application Breakdown | Traffic classification results |
-| Detected SNIs | Actual domain names found |
+- YOUTUBE — 120 packets
+- FACEBOOK — 80 packets
+- GOOGLE — 60 packets
+- DNS — 40 packets
+- UNKNOWN — 200 packets
 
----
+### Domain Detection
 
-## 12. Extending the Project
+Detected SNIs:
 
-### Ideas for Improvement
+- youtube.com
+- google.com
+- facebook.com
+- github.com
 
-1. **Add More App Signatures**
-   ```cpp
-   // In types.cpp
-   if (sni.find("twitch") != std::string::npos)
-       return AppType::TWITCH;
-   ```
+## 12. Performance Notes
 
-2. **Add Bandwidth Throttling**
-   ```cpp
-   // Instead of DROP, delay packets
-   if (shouldThrottle(flow)) {
-       std::this_thread::sleep_for(10ms);
-   }
-   ```
+### JavaScript vs C++
 
-3. **Add Live Statistics Dashboard**
-   ```cpp
-   // Separate thread printing stats every second
-   void statsThread() {
-       while (running) {
-           printStats();
-           sleep(1);
-       }
-   }
-   ```
+| Feature | C++ | JavaScript |
+|---|---|---|
+| Compilation | Required | Not required |
+| Threads | Real OS Threads | Async/Event Loop |
+| Performance | Faster | Simpler |
+| Portability | Compiler dependent | Cross-platform |
+| Dependencies | Compiler | Node.js |
 
-4. **Add QUIC/HTTP3 Support**
-   - QUIC uses UDP on port 443
-   - SNI is in the Initial packet (encrypted differently)
+### Important Difference
 
-5. **Add Persistent Rules**
-   - Save rules to file
-   - Load on startup
+The JavaScript version:
 
----
+- preserves the same architecture
+- preserves the same DPI logic
+- preserves the same filtering behavior
+
+but uses:
+
+- Asynchronous queues
+- instead of native multi-threading
+
+## 13. Extending the Project
+
+### Add More App Signatures
+
+```js
+if (sni.includes("netflix")) {
+  return "NETFLIX";
+}
+```
+
+### Add QUIC Support
+
+QUIC uses:
+
+- UDP port 443
+
+Future enhancement:
+
+- parse QUIC Initial packets
+- extract SNI from TLS-over-QUIC
+
+### Add Live Dashboard
+
+Possible additions:
+
+- WebSocket server
+- React frontend
+- Real-time traffic graphs
+
+### Add Persistent Rules
+
+Store rules in:
+
+- `rules.json`
+
+and auto-load at startup.
 
 ## Summary
 
-This DPI engine demonstrates:
+This project demonstrates:
 
-1. **Network Protocol Parsing** - Understanding packet structure
-2. **Deep Packet Inspection** - Looking inside encrypted connections
-3. **Flow Tracking** - Managing stateful connections
-4. **Multi-threaded Architecture** - Scaling with thread pools
-5. **Producer-Consumer Pattern** - Thread-safe queues
+- Network packet parsing
+- Deep packet inspection
+- TLS SNI extraction
+- Stateful flow tracking
+- Rule-based filtering
+- Queue-based processing architecture
+- High-performance packet analysis in Node.js
 
-The key insight is that even HTTPS traffic leaks the destination domain in the TLS handshake, allowing network operators to identify and control application usage.
+The most important insight:
 
----
+Even encrypted HTTPS traffic exposes the destination hostname during the TLS handshake using SNI.
 
-## Questions?
+That is the foundation of modern DPI systems.
 
-If you have questions about any part of this project, the code is well-commented and follows the same flow described in this document. Start with the simple version (`main_working.cpp`) to understand the concepts, then move to the multi-threaded version (`dpi_mt.cpp`) to see how parallelism is added.
+## Final Notes
 
-Happy learning! 🚀
+To fully understand the project flow:
+
+Start reading:
+
+- `src/main.js`
+
+then follow:
+
+- `dpiEngine.js`
+- `packetParser.js`
+- `sniExtractor.js`
+- `connectionTracker.js`
+- `fastPath.js`
