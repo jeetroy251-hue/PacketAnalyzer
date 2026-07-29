@@ -117,22 +117,27 @@ app.post('/start-analysis', upload.single('pcap'), async (req, res) => {
 
         const success = await engine.processFile(inputFile, outputFile);
 
+        if (!success && fs.existsSync(outputFile)) {
+            fs.unlinkSync(outputFile);
+        }
+
         currentSession = {
             status: success ? 'completed' : 'failed',
             startedAt: currentSession.startedAt,
             finishedAt: new Date().toISOString(),
             stats: engine.getStats(),
             report: engine.getReportJSON(),
-            error: success ? null : 'Processing failed',
-            outputFile: path.basename(outputFile)
+            error: success ? null : engine.lastError || 'Processing failed',
+            outputFile: success ? path.basename(outputFile) : null
         };
 
-        return res.json({
+        return res.status(success ? 200 : 500).json({
             success,
             status: currentSession.status,
             stats: currentSession.stats,
             report: currentSession.report,
-            outputFile: currentSession.outputFile
+            outputFile: currentSession.outputFile,
+            error: currentSession.error
         });
     } catch (error) {
         currentSession = {

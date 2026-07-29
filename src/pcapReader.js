@@ -46,13 +46,21 @@ class PcapReader {
             const headerBuffer = Buffer.alloc(24);
             fs.readSync(this.fileHandle, headerBuffer, 0, 24, 0);
 
-            this.global_header = PcapGlobalHeader.fromBuffer(headerBuffer);
+            const magicLE = headerBuffer.readUInt32LE(0);
+            const magicBE = headerBuffer.readUInt32BE(0);
 
-            // Check magic number to detect byte order
-            if (this.global_header.magic_number === 0xa1b2c3d4) {
+            if (magicLE === 0x0A0D0D0A || magicBE === 0x0A0D0D0A) {
+                console.error('[PcapReader] Error: PCAPNG format is not supported');
+                fs.closeSync(this.fileHandle);
+                return false;
+            }
+
+            if (magicLE === 0xa1b2c3d4 || magicLE === 0xa1b23c4d) {
                 this.isBigEndian = false;
-            } else if (this.global_header.magic_number === 0xd4c3b2a1) {
+                this.global_header = PcapGlobalHeader.fromBuffer(headerBuffer);
+            } else if (magicBE === 0xa1b2c3d4 || magicBE === 0xa1b23c4d) {
                 this.isBigEndian = true;
+                this.global_header = PcapGlobalHeader.fromBufferBE(headerBuffer);
             } else {
                 console.error('[PcapReader] Error: Invalid PCAP magic number');
                 fs.closeSync(this.fileHandle);
@@ -69,7 +77,11 @@ class PcapReader {
         }
     }
 
+    
+
     readNextPacket(rawPacket) {
+        console.log("Current Position:", this.currentPosition);
+console.log("File Size:", this.fileSize);
         try {
             // Check if we're at end of file
             if (this.currentPosition >= this.fileSize) {
@@ -106,15 +118,12 @@ class PcapReader {
             console.error(`[PcapReader] Error reading packet: ${error.message}`);
             return false;
         }
+
+        
     }
 
     readPacketHeaderBE(buffer) {
-        const header = new PcapPacketHeader();
-        header.ts_sec = buffer.readUInt32BE(0);
-        header.ts_usec = buffer.readUInt32BE(4);
-        header.incl_len = buffer.readUInt32BE(8);
-        header.orig_len = buffer.readUInt32BE(12);
-        return header;
+        return PcapPacketHeader.fromBufferBE(buffer);
     }
 
     close() {

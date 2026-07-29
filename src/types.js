@@ -185,6 +185,18 @@ class PcapGlobalHeader {
         header.network = buffer.readUInt32LE(20);
         return header;
     }
+
+    static fromBufferBE(buffer) {
+        const header = new PcapGlobalHeader();
+        header.magic_number = buffer.readUInt32BE(0);
+        header.version_major = buffer.readUInt16BE(4);
+        header.version_minor = buffer.readUInt16BE(6);
+        header.thiszone = buffer.readInt32BE(8);
+        header.sigfigs = buffer.readUInt32BE(12);
+        header.snaplen = buffer.readUInt32BE(16);
+        header.network = buffer.readUInt32BE(20);
+        return header;
+    }
 }
 
 class PcapPacketHeader {
@@ -210,6 +222,15 @@ class PcapPacketHeader {
         header.ts_usec = buffer.readUInt32LE(4);
         header.incl_len = buffer.readUInt32LE(8);
         header.orig_len = buffer.readUInt32LE(12);
+        return header;
+    }
+
+    static fromBufferBE(buffer) {
+        const header = new PcapPacketHeader();
+        header.ts_sec = buffer.readUInt32BE(0);
+        header.ts_usec = buffer.readUInt32BE(4);
+        header.incl_len = buffer.readUInt32BE(8);
+        header.orig_len = buffer.readUInt32BE(12);
         return header;
     }
 }

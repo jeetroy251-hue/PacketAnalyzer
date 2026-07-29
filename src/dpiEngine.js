@@ -30,6 +30,7 @@ class DPIEngine {
         
         this.running = false;
         this.processing_complete = false;
+        this.lastError = null;
         
         this.output_file = null;
         this.output_filename = '';
@@ -164,6 +165,7 @@ class DPIEngine {
             this.output_file = fs.createWriteStream(outputFile);
             this.output_filename = outputFile;
         } catch (error) {
+            this.lastError = error.message;
             this.log('[DPIEngine] Error: Cannot open output file');
             return false;
         }
@@ -172,10 +174,15 @@ class DPIEngine {
         await this.start();
         
         // Process input file
-        await this.readerThread(inputFile);
+        const readerSuccess = await this.readerThread(inputFile);
+        if (!readerSuccess) {
+            this.lastError = this.lastError || '[DPIEngine] Error: Reader failed';
+        }
         
-        // Give time for final packets
-        await this.sleep(200);
+        // Give time for final packets if processing began successfully
+        if (readerSuccess) {
+            await this.sleep(200);
+        }
         
         // Stop all threads
         this.stop();
@@ -183,6 +190,11 @@ class DPIEngine {
         // Close output file
         if (this.output_file) {
             this.output_file.end();
+        }
+        
+        if (!readerSuccess) {
+            this.log('[DPIEngine] Processing aborted due to reader error');
+            return false;
         }
         
         // Print final report
@@ -201,8 +213,9 @@ class DPIEngine {
                 resolve(reader.open(inputFile));
             }, 0);
         }))) {
+            this.lastError = '[Reader] Error: Cannot open input file';
             console.error('[Reader] Error: Cannot open input file');
-            return;
+            return false;
         }
         
         // Write PCAP header to output
@@ -260,6 +273,7 @@ class DPIEngine {
         reader.close();
         
         this.processing_complete = true;
+        return true;
     }
 
     async processPendingPackets() {
