@@ -142,39 +142,37 @@ class RuleManager {
     // ========== Combined Check ==========
 
     shouldBlock(srcIp, dstPort, app, domain = '') {
-        // Check IP first (most specific)
+        const reasons = [];
+
         if (this.isIPBlocked(srcIp)) {
-            return {
+            reasons.push({
                 type: 'IP',
                 detail: this.ipToString(srcIp)
-            };
+            });
         }
-        
-        // Check port
+
         if (this.isPortBlocked(dstPort)) {
-            return {
+            reasons.push({
                 type: 'PORT',
                 detail: String(dstPort)
-            };
+            });
         }
-        
-        // Check app
+
         if (this.isAppBlocked(app)) {
-            return {
+            reasons.push({
                 type: 'APP',
                 detail: appTypeToString(app)
-            };
+            });
         }
-        
-        // Check domain
+
         if (domain && domain.length > 0 && this.isDomainBlocked(domain)) {
-            return {
+            reasons.push({
                 type: 'DOMAIN',
                 detail: domain
-            };
+            });
         }
-        
-        return null;
+
+        return reasons.length > 0 ? reasons : null;
     }
 
     // ========== Persistence ==========

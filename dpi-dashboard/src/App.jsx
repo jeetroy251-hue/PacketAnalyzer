@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -38,6 +38,7 @@ function StatsCard({ label, value, color }) {
 }
 
 function App() {
+  const fileInputRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [status, setStatus] = useState('idle');
   const [stats, setStats] = useState({
@@ -54,6 +55,7 @@ function App() {
     app_distribution: {}
   });
   const [events, setEvents] = useState([]);
+  const [packetDetails, setPacketDetails] = useState([]);
   const [outputFile, setOutputFile] = useState(null);
   const [blockAppInput, setBlockAppInput] = useState('');
   const [blockIpInput, setBlockIpInput] = useState('');
@@ -62,7 +64,9 @@ function App() {
   const [activeTab, setActiveTab] = useState('stats');
 
   const appDistributionData = useMemo(() => {
-    return Object.entries(connections.app_distribution || {}).map(([appType, count]) => ({ name: appType, value: count }));
+    return Object.entries(connections.app_distribution || {})
+      .map(([appType, count]) => ({ name: appType, value: count }))
+      .sort((a, b) => b.value - a.value);
   }, [connections.app_distribution]);
 
   const packetDistributionData = useMemo(() => [
@@ -71,13 +75,20 @@ function App() {
   ], [stats.forwarded_packets, stats.dropped_packets]);
 
   useEffect(() => {
+    const initialize = async () => {
+      await resetDashboard();
+      fetchStats();
+      fetchConnections();
+    };
+
     const interval = setInterval(() => {
       fetchStats();
       fetchEvents();
       fetchConnections();
     }, 1000);
-    fetchStats();
-    fetchConnections();
+
+    initialize();
+
     return () => clearInterval(interval);
   }, []);
 
@@ -85,11 +96,25 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/stats`);
       const json = await res.json();
-      if (json.stats) setStats(json.stats);
-      if (json.outputFile) setOutputFile(json.outputFile);
-      if (json.status) setStatus(json.status);
+      setStats(json.stats || {
+        total_packets: 0,
+        tcp_packets: 0,
+        udp_packets: 0,
+        forwarded_packets: 0,
+        dropped_packets: 0
+      });
+      setOutputFile(json.outputFile || null);
+      setStatus(json.status || 'idle');
     } catch (error) {
       console.error(error);
+      setStats({
+        total_packets: 0,
+        tcp_packets: 0,
+        udp_packets: 0,
+        forwarded_packets: 0,
+        dropped_packets: 0
+      });
+      setStatus('idle');
     }
   }
 
@@ -97,18 +122,20 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/connections`);
       const json = await res.json();
-      if (json.connections) {
-        setConnections((prev) => ({
-          total_active_connections: 0,
-          total_connections_seen: 0,
-          top_domains: [],
-          app_distribution: {},
-          ...prev,
-          ...json.connections
-        }));
-      }
+      setConnections({
+        total_active_connections: json.connections?.total_active_connections || 0,
+        total_connections_seen: json.connections?.total_connections_seen || 0,
+        top_domains: json.connections?.top_domains || [],
+        app_distribution: json.connections?.app_distribution || {}
+      });
     } catch (error) {
       console.error(error);
+      setConnections({
+        total_active_connections: 0,
+        total_connections_seen: 0,
+        top_domains: [],
+        app_distribution: {}
+      });
     }
   }
 
@@ -116,15 +143,52 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/events`);
       const json = await res.json();
-      if (json.events) setEvents(json.events.slice(-10).reverse());
+      setEvents((json.events || []).slice(-10).reverse());
+      setPacketDetails(json.packet_details || []);
     } catch (error) {
       console.error(error);
+      setEvents([]);
+      setPacketDetails([]);
     }
   }
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0];
     setSelectedFile(file || null);
+  };
+
+  const resetDashboard = async () => {
+    setSelectedFile(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    setStatus('idle');
+    setStats({
+      total_packets: 0,
+      tcp_packets: 0,
+      udp_packets: 0,
+      forwarded_packets: 0,
+      dropped_packets: 0
+    });
+    setConnections({
+      total_active_connections: 0,
+      total_connections_seen: 0,
+      top_domains: [],
+      app_distribution: {}
+    });
+    setEvents([]);
+    setPacketDetails([]);
+    setOutputFile(null);
+    setBlockAppInput('');
+    setBlockIpInput('');
+    setBlockDomainInput('');
+    setBlockRules({ apps: [], ips: [], domains: [] });
+
+    try {
+      await fetch(`${API_BASE}/reset`, { method: 'POST' });
+    } catch (error) {
+      console.error('Failed to reset backend session:', error);
+    }
   };
 
   const addRule = (type) => {
@@ -208,6 +272,7 @@ function App() {
             <label className="flex flex-col gap-2 text-slate-200">
               Upload PCAP file
               <input
+                ref={fileInputRef}
                 type="file"
                 accept=".pcap,.pcapng"
                 onChange={handleFileChange}
@@ -223,7 +288,7 @@ function App() {
                 Start Analysis
               </button>
               <button
-                onClick={() => setSelectedFile(null)}
+                onClick={resetDashboard}
                 className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 px-6 py-3 text-base text-slate-200 transition hover:border-slate-500"
               >
                 Reset File
@@ -352,11 +417,14 @@ function App() {
           <h2 className="text-2xl font-semibold text-white">Application Breakdown</h2>
           <div className="mt-6 h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={appDistributionData} dataKey="value" nameKey="name" outerRadius={100} fill="#38bdf8" label />
-                <Tooltip cursor={{ fill: 'rgba(15, 23, 42, 0.85)' }} />
+              <BarChart data={appDistributionData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="name" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" />
+                <Tooltip wrapperStyle={{ backgroundColor: '#0f172a', borderRadius: 12, border: '1px solid #334155' }} />
                 <Legend />
-              </PieChart>
+                <Bar dataKey="value" fill="#38bdf8" radius={[8, 8, 0, 0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -401,6 +469,49 @@ function App() {
               <Bar dataKey="value" fill="#38bdf8" radius={[8, 8, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
+        </div>
+      </section>
+
+      <section className="mt-6 rounded-3xl bg-panel p-6 shadow-xl shadow-slate-900/30">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold text-white">Packet Details</h2>
+            <p className="text-slate-400">Recent packet records with action and drop reason.</p>
+          </div>
+        </div>
+        <div className="mt-6 overflow-x-auto rounded-3xl bg-slate-950 p-4">
+          <table className="min-w-full border-collapse text-sm text-left text-slate-200">
+            <thead>
+              <tr className="border-b border-slate-700 text-slate-300">
+                <th className="px-4 py-3">Packet No</th>
+                <th className="px-4 py-3">Src IP</th>
+                <th className="px-4 py-3">Dst IP</th>
+                <th className="px-4 py-3">Protocol</th>
+                <th className="px-4 py-3">App</th>
+                <th className="px-4 py-3">Action</th>
+                <th className="px-4 py-3">Dropped Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {packetDetails.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-6 text-center text-slate-500">No packet details available.</td>
+                </tr>
+              ) : (
+                packetDetails.slice(-20).reverse().map((packet) => (
+                  <tr key={packet.packet_id} className="border-b border-slate-800">
+                    <td className="px-4 py-3">{packet.packet_id}</td>
+                    <td className="px-4 py-3">{packet.src_ip}</td>
+                    <td className="px-4 py-3">{packet.dst_ip}</td>
+                    <td className="px-4 py-3">{packet.protocol}</td>
+                    <td className="px-4 py-3">{packet.app}</td>
+                    <td className="px-4 py-3">{packet.action}</td>
+                    <td className="px-4 py-3">{packet.reason || '-'}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
     </div>

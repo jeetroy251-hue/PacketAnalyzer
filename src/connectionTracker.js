@@ -180,6 +180,10 @@ class GlobalConnectionTable {
         
         const domainCounts = {};
         
+        const isValidDomain = (domain) => {
+            return typeof domain === 'string' && domain.length > 3 && domain.includes('.') && !/\s/.test(domain) && !domain.startsWith('(') && !domain.startsWith('http');
+        };
+
         for (const tracker of this.trackers) {
             if (!tracker) continue;
             
@@ -189,12 +193,13 @@ class GlobalConnectionTable {
             
             // Collect app distribution
             tracker.forEach((conn) => {
-                if (!stats.app_distribution[conn.app_type]) {
-                    stats.app_distribution[conn.app_type] = 0;
+                const appName = appTypeToString(conn.app_type);
+                if (!stats.app_distribution[appName]) {
+                    stats.app_distribution[appName] = 0;
                 }
-                stats.app_distribution[conn.app_type]++;
+                stats.app_distribution[appName]++;
                 
-                if (conn.sni && conn.sni.length > 0) {
+                if (conn.sni && conn.sni.length > 0 && isValidDomain(conn.sni)) {
                     if (!domainCounts[conn.sni]) {
                         domainCounts[conn.sni] = 0;
                     }

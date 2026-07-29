@@ -10,7 +10,7 @@ const { RuleManager } = require('./ruleManager');
 const { FastPath, FPManager } = require('./fastPath');
 const { LBManager } = require('./loadBalancer');
 const { GlobalConnectionTable } = require('./connectionTracker');
-const { PacketJob, FiveTuple, PcapGlobalHeader, PcapPacketHeader, PacketAction, stringToIp, appTypeToString } = require('./types');
+const { PacketJob, FiveTuple, PcapGlobalHeader, PcapPacketHeader, PacketAction, stringToIp, ipToString, appTypeToString } = require('./types');
 
 class DPIEngine {
     constructor(config = {}) {
@@ -45,6 +45,7 @@ class DPIEngine {
         };
         
         this.events = [];
+        this.packetDetails = [];
         
         this.printBanner();
     }
@@ -96,8 +97,8 @@ class DPIEngine {
         }
         
         // Create output callback
-        const outputCb = (job, action) => {
-            this.handleOutput(job, action);
+        const outputCb = (job, action, blockReason, domain, appType) => {
+            this.handleOutput(job, action, blockReason, domain, appType);
         };
         
         // Create FP manager
@@ -344,16 +345,38 @@ class DPIEngine {
         return job;
     }
 
-    handleOutput(job, action, blockReason, domain) {
+    handleOutput(job, action, blockReason, domain, appType = 0) {
+        const protocol = job.tuple.protocol === 6 ? 'TCP' : job.tuple.protocol === 17 ? 'UDP' : `PROTO_${job.tuple.protocol}`;
+        const appName = appTypeToString(appType);
+        let reasonText = '';
+
+        if (Array.isArray(blockReason)) {
+            reasonText = blockReason.map((reason) => {
+                if (!reason) return '';
+                return `Blocked ${reason.type}${reason.detail ? `: ${reason.detail}` : ''}`;
+            }).filter((text) => text.length > 0).join(', ');
+        } else if (blockReason) {
+            reasonText = `Blocked ${blockReason.type}${blockReason.detail ? `: ${blockReason.detail}` : ''}`;
+        }
+
+        this.packetDetails.push({
+            packet_id: job.packet_id,
+            src_ip: ipToString(job.tuple.src_ip),
+            dst_ip: ipToString(job.tuple.dst_ip),
+            protocol,
+            app: appName,
+            action,
+            reason: reasonText
+        });
+        if (this.packetDetails.length > this.config.eventLimit) {
+            this.packetDetails.shift();
+        }
+
         if (action === PacketAction.DROP) {
             this.stats.dropped_packets++;
             let logMsg = `Packet ${job.packet_id} blocked`;
-            if (blockReason) {
-                logMsg += ` (${blockReason.type}`;
-                if (blockReason.detail) {
-                    logMsg += `: ${blockReason.detail}`;
-                }
-                logMsg += ')';
+            if (reasonText) {
+                logMsg += ` (${reasonText})`;
             } else if (domain) {
                 logMsg += ` (domain: ${domain})`;
             }
@@ -363,7 +386,7 @@ class DPIEngine {
             this.recordEvent(logMsg);
             return;
         }
-        
+
         this.stats.forwarded_packets++;
         this.recordEvent(`Packet ${job.packet_id} forwarded`);
         this.writeOutputPacket(job);
@@ -505,6 +528,7 @@ class DPIEngine {
             rules: this.getRuleSummary(),
             connections: this.getConnectionSummary(),
             events: this.getEventLog(),
+            packet_details: [...this.packetDetails],
             output_file: this.output_filename
         };
     }

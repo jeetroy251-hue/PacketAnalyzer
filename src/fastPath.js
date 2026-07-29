@@ -85,7 +85,7 @@ class FastPath {
         
         // Call output callback with block reason
         if (this.output_callback) {
-            this.output_callback(job, action, blockReason, domain);
+            this.output_callback(job, action, blockReason, domain, conn.app_type);
         }
         
         return action;

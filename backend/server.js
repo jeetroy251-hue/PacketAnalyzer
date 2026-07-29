@@ -28,12 +28,28 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/download', express.static(uploadDir));
 
+const emptyStats = {
+    total_packets: 0,
+    total_bytes: 0,
+    tcp_packets: 0,
+    udp_packets: 0,
+    forwarded_packets: 0,
+    dropped_packets: 0
+};
+
+const emptyConnections = {
+    total_active_connections: 0,
+    total_connections_seen: 0,
+    top_domains: [],
+    app_distribution: {}
+};
+
 let currentSession = {
     status: 'idle',
     startedAt: null,
     finishedAt: null,
-    stats: {},
-    report: {},
+    stats: { ...emptyStats },
+    report: { connections: { ...emptyConnections }, events: [] },
     error: null,
     outputFile: null
 };
@@ -150,10 +166,23 @@ app.post('/start-analysis', upload.single('pcap'), async (req, res) => {
     }
 });
 
+app.post('/reset', (req, res) => {
+    currentSession = {
+        status: 'idle',
+        startedAt: null,
+        finishedAt: null,
+        stats: { ...emptyStats },
+        report: { connections: { ...emptyConnections }, events: [] },
+        error: null,
+        outputFile: null
+    };
+    return res.json({ success: true });
+});
+
 app.get('/stats', (req, res) => {
     res.json({
         status: currentSession.status,
-        stats: currentSession.stats,
+        stats: currentSession.stats || { ...emptyStats },
         startedAt: currentSession.startedAt,
         finishedAt: currentSession.finishedAt,
         outputFile: currentSession.outputFile
@@ -164,10 +193,7 @@ app.get('/connections', (req, res) => {
     res.json({
         status: currentSession.status,
         connections: {
-            total_active_connections: 0,
-            total_connections_seen: 0,
-            top_domains: [],
-            app_distribution: {},
+            ...emptyConnections,
             ...(currentSession.report.connections || {})
         },
         rules: currentSession.report.rules || {}
@@ -185,7 +211,8 @@ app.get('/report', (req, res) => {
 app.get('/events', (req, res) => {
     res.json({
         status: currentSession.status,
-        events: currentSession.report.events || []
+        events: currentSession.report.events || [],
+        packet_details: currentSession.report.packet_details || []
     });
 });
 
