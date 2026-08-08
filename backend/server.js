@@ -1,4 +1,8 @@
 const express = require('express');
+
+console.log("🔥 DPI SERVER FILE LOADED");
+console.log("🔥 SERVER DIRECTORY:", __dirname);
+
 const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
@@ -225,7 +229,17 @@ app.get('/status', (req, res) => {
     });
 });
 
+app.get('/health', (req, res) => {
+    console.log('🔥 HEALTH ROUTE HIT');
+
+    res.status(200).json({
+        success: true,
+        message: 'DPI backend is running'
+    });
+});
+
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
+
+app.listen(port, '0.0.0.0', () => {
     console.log(`DPI backend server is running on http://localhost:${port}`);
 });
