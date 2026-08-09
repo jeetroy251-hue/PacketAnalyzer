@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -38,6 +38,7 @@ function StatsCard({ label, value, color }) {
 function App() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [status, setStatus] = useState('idle');
+  const fileInputRef = useRef(null);
   const [stats, setStats] = useState({
     total_packets: 0,
     tcp_packets: 0,
@@ -69,13 +70,14 @@ function App() {
   ], [stats.forwarded_packets, stats.dropped_packets]);
 
   useEffect(() => {
+    // Page load par backend session reset karo taaki purana data na dikhaye
+    fetch(`${API_BASE}/reset`, { method: 'POST' }).catch(() => {});
+
     const interval = setInterval(() => {
       fetchStats();
       fetchEvents();
       fetchConnections();
     }, 1000);
-    fetchStats();
-    fetchConnections();
     return () => clearInterval(interval);
   }, []);
 
@@ -96,14 +98,13 @@ function App() {
       const res = await fetch(`${API_BASE}/connections`);
       const json = await res.json();
       if (json.connections) {
-        setConnections((prev) => ({
+        setConnections({
           total_active_connections: 0,
           total_connections_seen: 0,
           top_domains: [],
           app_distribution: {},
-          ...prev,
           ...json.connections
-        }));
+        });
       }
     } catch (error) {
       console.error(error);
@@ -123,6 +124,38 @@ function App() {
   const handleFileChange = (event) => {
     const file = event.target.files?.[0];
     setSelectedFile(file || null);
+  };
+
+  const handleResetFile = async () => {
+    // File input clear karo (React ref se browser input reset)
+    setSelectedFile(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    // Backend session aur saara data reset karo
+    try {
+      await fetch(`${API_BASE}/reset`, { method: 'POST' });
+    } catch (error) {
+      console.error('Reset failed:', error);
+    }
+    // Frontend state saaf karo
+    setStatus('idle');
+    setStats({
+      total_packets: 0,
+      tcp_packets: 0,
+      udp_packets: 0,
+      forwarded_packets: 0,
+      dropped_packets: 0
+    });
+    setConnections({
+      total_active_connections: 0,
+      total_connections_seen: 0,
+      top_domains: [],
+      app_distribution: {}
+    });
+    setEvents([]);
+    setOutputFile(null);
+    setBlockRules({ apps: [], ips: [], domains: [] });
   };
 
   const addRule = (type) => {
@@ -206,6 +239,7 @@ function App() {
             <label className="flex flex-col gap-2 text-slate-200">
               Upload PCAP file
               <input
+                ref={fileInputRef}
                 type="file"
                 accept=".pcap,.pcapng"
                 onChange={handleFileChange}
@@ -221,7 +255,7 @@ function App() {
                 Start Analysis
               </button>
               <button
-                onClick={() => setSelectedFile(null)}
+                onClick={handleResetFile}
                 className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 px-6 py-3 text-base text-slate-200 transition hover:border-slate-500"
               >
                 Reset File
