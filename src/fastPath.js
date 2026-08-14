@@ -24,70 +24,71 @@ class FastPath {
 
     processPacket(job) {
         this.stats.total_processed++;
-        
+
         // Get or create connection
         const conn = this.connection_tracker.getOrCreateConnection(job.tuple);
-        
+
         // Update connection stats
-        const isOutbound = true;  // For simplicity, assume outbound
-        this.connection_tracker.updateConnection(conn, job.data.length, isOutbound);
-        
+        this.connection_tracker.updateConnection(conn, job.data.length, true);
+
+        // ── FIX: If this connection was already blocked on a previous packet,
+        //         drop immediately without re-running rule checks.
+        //         This prevents double-counting and avoids mis-classifying
+        //         follow-up packets (ACK/data) that carry no SNI.
+        if (conn.blocked === true) {
+            this.stats.total_dropped++;
+            if (this.output_callback) {
+                const cachedReason = conn.blockReason || null;
+                this.output_callback(job, PacketAction.DROP, cachedReason, conn.sni || '', conn.app_type);
+            }
+            return PacketAction.DROP;
+        }
+
         // Try to extract domain/SNI from payload
         let domain = '';
         if (job.payload_data && job.payload_length > 0) {
             domain = PayloadExtractor.extractServerName(job.payload_data, job.tuple.protocol) || '';
-            
-            // Classify connection if we found domain
-            if (domain && domain.length > 0) {
+
+            // Classify connection if we got a domain this packet
+            if (domain) {
                 const appType = sniToAppType(domain);
                 this.connection_tracker.classifyConnection(conn, appType, domain);
             }
         }
-        
-        // Debug: Log domain extraction and active rule list for troubleshooting
-        const activeBlockedDomains = this.rule_manager.getBlockedDomains() || [];
-        const logDomain = domain || '(no domain extracted)';
-        process.stderr.write(`[DPI Debug] Detected domain: "${logDomain}" | Active Rules: ${JSON.stringify(activeBlockedDomains)}\n`);
-        if (!domain) {
-            process.stderr.write('[DPI Debug] Warning: Packet domain is undefined or empty string.\n');
-        }
-        
-        // Local JS engine verification: check domain rules with suffix matching
-        const domainRuleMatched = domain && activeBlockedDomains.some((rule) => {
-            if (!rule) return false;
-            const lowerDomain = domain.toLowerCase();
-            const lowerRule = rule.toLowerCase();
-            return lowerDomain === lowerRule || lowerDomain.endsWith('.' + lowerRule);
-        });
-        if (domainRuleMatched) {
-            process.stderr.write(`[DPI ACTION] BLOCKED packet for domain: ${domain} due to rule list: ${JSON.stringify(activeBlockedDomains)}\n`);
-        }
-        
-        // Check blocking rules
-        const blockReason = this.rule_manager.shouldBlock(
+
+        // Use the connection's known domain if this packet had no extractable one
+        const effectiveDomain = domain || conn.sni || '';
+
+        // Check blocking rules against this packet
+        const blockReasons = this.rule_manager.shouldBlock(
             job.tuple.src_ip,
             job.tuple.dst_port,
             conn.app_type,
-            domain
+            effectiveDomain
         );
-        
+
         let action = PacketAction.FORWARD;
-        
-        if (blockReason) {
+
+        if (blockReasons) {
             action = PacketAction.DROP;
+            // Mark connection so future packets of same flow are dropped instantly
             this.connection_tracker.blockConnection(conn);
+            conn.blockReason = blockReasons; // cache for follow-up packets
             this.stats.total_dropped++;
-            // Debug: Log blocked packets
-            process.stderr.write(`[FastPath] Pkt ${job.packet_id} BLOCKED - ${blockReason.type}: ${blockReason.detail} (domain: ${domain})\n`);
+
+            // Safe log — blockReasons is an array
+            const reasonStr = blockReasons
+                .map(r => `${r.type}:${r.detail}`)
+                .join(', ');
+            process.stderr.write(`[FastPath] Pkt ${job.packet_id} BLOCKED [${reasonStr}] domain="${effectiveDomain}"\n`);
         } else {
             this.stats.total_forwarded++;
         }
-        
-        // Call output callback with block reason
+
         if (this.output_callback) {
-            this.output_callback(job, action, blockReason, domain, conn.app_type);
+            this.output_callback(job, action, blockReasons, effectiveDomain, conn.app_type);
         }
-        
+
         return action;
     }
 

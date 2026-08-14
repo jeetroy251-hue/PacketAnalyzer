@@ -82,10 +82,14 @@ class ConnectionTracker {
 
     blockConnection(conn) {
         if (!conn) return;
-        
-        conn.state = ConnectionState.BLOCKED;
-        conn.action = PacketAction.DROP;
-        this.blocked_count++;
+
+        // Only increment blocked_count once per connection
+        if (conn.blocked !== true) {
+            conn.state = ConnectionState.BLOCKED;
+            conn.action = PacketAction.DROP;
+            conn.blocked = true;  // Fast-path flag: subsequent packets drop instantly
+            this.blocked_count++;
+        }
     }
 
     closeConnection(tuple) {

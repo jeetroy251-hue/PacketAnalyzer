@@ -67,6 +67,10 @@ class DPIEngine {
         if (this.events.length > this.config.eventLimit) {
             this.events.shift();
         }
+        // Fire live SSE callback if provided
+        if (typeof this.config.onEvent === 'function') {
+            try { this.config.onEvent(entry); } catch (_) {}
+        }
     }
 
     getEventLog() {
@@ -260,11 +264,16 @@ class DPIEngine {
             const lb = this.lb_manager.getLBForPacket(job.tuple);
             lb.recordReceived();
             lb.input_queue.packets.push(job);
-            
+
             // Process packets in queues
             await this.processPendingPackets();
-            
+
             packetCount++;
+
+            // Broadcast live progress every 50 packets
+            if (typeof this.config.onProgress === 'function' && packetCount % 50 === 0) {
+                try { this.config.onProgress({ ...this.stats }); } catch (_) {}
+            }
         }
         
         // Process remaining packets
